@@ -1,13 +1,19 @@
 import logging
 import os
 from typing import List
-from fastapi import FastAPI, UploadFile, File, HTTPException, status
+from fastapi import FastAPI, UploadFile, File, HTTPException, status, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import uvicorn
 
+# Load environment variables first
+import dotenv
+dotenv.load_dotenv()
+
 from models import ExtractionResponse, HealthResponse, ErrorResponse, ExtractedDocument, ExtractionSummary
 from extractor import DocumentExtractor
+from websocket_handlers import websocket_handler
+from config import settings
 
 # Configure logging
 logging.basicConfig(
@@ -18,8 +24,8 @@ logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Document Text Extractor",
-    description="Microservice for extracting text from various document formats using PyMuPDF",
+    title="Document Text Extractor & Gemini Audio API",
+    description="Microservice for extracting text from documents and real-time audio conversation with Gemini",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
@@ -28,7 +34,7 @@ app = FastAPI(
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=settings.server.cors_origins + ["*"],  # Include configured origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -50,6 +56,23 @@ async def health_check():
         version="1.0.0",
         supported_formats=extractor.get_supported_formats()
     )
+
+
+@app.get("/gemini/health")
+async def gemini_health_check():
+    """Gemini service health check"""
+    try:
+        return {
+            "status": "healthy",
+            "gemini_model": settings.gemini.model,
+            "voice_name": settings.gemini.voice_name,
+            "timestamp": extractor.get_supported_formats()  # Reuse timestamp logic
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Gemini service unavailable: {str(e)}"
+        )
 
 
 @app.post("/extract-text", response_model=ExtractionResponse)
@@ -139,6 +162,12 @@ async def get_supported_formats():
     }
 
 
+@app.websocket("/ws/audio")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for Gemini audio streaming"""
+    await websocket_handler.handle_connection(websocket)
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     """Global exception handler."""
@@ -154,24 +183,23 @@ async def global_exception_handler(request, exc):
 
 
 if __name__ == "__main__":
-    # Get configuration from environment
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "8001"))
-    log_level = os.getenv("LOG_LEVEL", "info").lower()
+    import dotenv
+    dotenv.load_dotenv()
     
     # Configure uvicorn logging
     log_config = uvicorn.config.LOGGING_CONFIG
     log_config["formatters"]["default"]["fmt"] = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     log_config["formatters"]["access"]["fmt"] = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     
-    logger.info(f"Starting Document Text Extractor service on {host}:{port}")
-    logger.info(f"Supported formats: {extractor.get_supported_formats()}")
+    logger.info(f"Starting Document Text Extractor & Gemini Audio service on {settings.server.host}:{settings.server.port}")
+    logger.info(f"Supported document formats: {extractor.get_supported_formats()}")
+    logger.info(f"Gemini model: {settings.gemini.model}")
     
     uvicorn.run(
         "app:app",
-        host=host,
-        port=port,
-        log_level=log_level,
-        reload=False,
+        host=settings.server.host,
+        port=settings.server.port,
+        log_level=settings.server.log_level.lower(),
+        reload=settings.server.reload,
         log_config=log_config
     )
